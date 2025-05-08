@@ -1,4 +1,4 @@
-module github.com/apiduct/api-bridge
+module api-bridge
 
 go 1.21
 

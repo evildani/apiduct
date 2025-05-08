@@ -1,7 +1,5 @@
-module github.com/apiduct/gre-tunnel
+module apiduct
 
-go 1.23.0
-
-toolchain go1.23.9
+go 1.21
 
 require golang.org/x/sys v0.33.0
