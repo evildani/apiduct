@@ -6,17 +6,19 @@ A secure API tunneling system that enables secure communication through persiste
 
 ### API Bridge (Server)
 The API Bridge acts as a server that:
-- Listens for incoming TLS connections from API Offramp
-- Authenticates connections using PSK
-- Forwards HTTP requests to the target service
-- Returns responses back through the secure tunnel
+- Listens for incoming TLS connections from API Offramp on a dedicated port
+- Listens for HTTP requests from clients on a separate port
+- Authenticates TLS connections using PSK
+- Forwards HTTP requests from clients through the secure tunnel to the connected API Offramp
+- Returns responses from the API Offramp back to the clients
 
 ### API Offramp (Client)
 The API Offramp acts as a client that:
 - Initiates TLS connections to the API Bridge
 - Authenticates using PSK
-- Forwards HTTP requests from the target service
-- Returns responses back through the secure tunnel
+- Receives HTTP requests through the secure tunnel from the API Bridge
+- Forwards these requests to the configured target endpoint
+- Returns the target endpoint's responses back through the tunnel to the API Bridge
 - Automatically reconnects if the connection is lost
 - Maintains a persistent connection to the bridge
 
@@ -35,6 +37,7 @@ The API Offramp acts as a client that:
 - Go 1.21 or later
 - Valid TLS certificates (if using HTTPS)
 - Network access to the API Bridge server
+- Network access to the target endpoint
 
 ## Building
 
@@ -62,14 +65,13 @@ Build artifacts will be placed in the `build/<arch>/` directory.
 
 ```bash
 ./api-bridge \
-  -listen-ip 10.0.0.1 \
-  -listen-port 8081 \
-  -psk your-secret-key \
-  -target-port 8080 \
-  -target-host localhost \
-  -enable-https \
-  -cert-file /path/to/cert.pem \
-  -key-file /path/to/key.pem
+  -listen-ip 10.0.0.1 \        # IP address to listen for HTTP requests
+  -listen-port 8080 \          # Port to listen for HTTP requests from clients
+  -tunnel-port 8081 \          # Port to listen for TLS connections from API Offramp
+  -psk your-secret-key \       # Pre-shared key for tunnel authentication
+  -enable-https \              # Enable HTTPS support
+  -cert-file /path/to/cert.pem \ # TLS certificate
+  -key-file /path/to/key.pem     # TLS private key
 ```
 
 ### API Offramp (Client)
@@ -77,7 +79,7 @@ Build artifacts will be placed in the `build/<arch>/` directory.
 ```bash
 ./api-offramp \
   -remote-ip 10.0.0.1 \    # IP address of the API Bridge
-  -remote-port 8081 \      # Port of the API Bridge
+  -remote-port 8081 \      # Port of the API Bridge's tunnel listener
   -psk your-secret-key \   # Must match the bridge's PSK
   -target-port 8080 \      # Port of the target service
   -target-host localhost \ # Host of the target service
@@ -90,7 +92,7 @@ Build artifacts will be placed in the `build/<arch>/` directory.
 
 1. Start the API Bridge (server):
    ```bash
-   ./api-bridge -listen-ip 10.0.0.1 -listen-port 8081 -psk your-secret-key -target-port 8080 -target-host localhost
+   ./api-bridge -listen-ip 10.0.0.1 -listen-port 8080 -tunnel-port 8081 -psk your-secret-key
    ```
 
 2. Start the API Offramp (client):
@@ -98,21 +100,34 @@ Build artifacts will be placed in the `build/<arch>/` directory.
    ./api-offramp -remote-ip 10.0.0.1 -remote-port 8081 -psk your-secret-key -target-port 8080 -target-host localhost
    ```
 
-3. The API Offramp will:
-   - Connect to the API Bridge using TLS
-   - Authenticate using the PSK
-   - Forward HTTP requests to the target service
-   - Return responses through the secure tunnel
-   - Automatically reconnect if the connection is lost
+3. The system will:
+   - API Bridge listens for HTTP requests on port 8080
+   - API Bridge listens for TLS connections on port 8081
+   - API Offramp establishes a secure TLS connection to the API Bridge on port 8081
+   - API Bridge accepts HTTP requests from clients on port 8080
+   - API Bridge forwards these requests through the secure tunnel to the API Offramp
+   - API Offramp forwards the requests to the configured target endpoint
+   - API Offramp receives responses from the target endpoint
+   - API Offramp sends these responses back through the tunnel to the API Bridge
+   - API Bridge returns the responses to the original clients
+   - If the connection is lost, the API Offramp automatically attempts to reconnect
 
 ## Connection Flow
 
-1. API Offramp initiates a TLS connection to the API Bridge
-2. PSK authentication is performed
-3. Once authenticated, the connection is maintained
-4. HTTP requests are forwarded through the secure tunnel
-5. If the connection is lost, the offramp automatically attempts to reconnect
-6. All communication is encrypted using TLS 1.2+
+1. API Bridge starts listening on two ports:
+   - Port 8080 for HTTP requests from clients
+   - Port 8081 for TLS connections from API Offramp
+2. API Offramp initiates a TLS connection to the API Bridge on port 8081
+3. PSK authentication is performed
+4. Once authenticated, the connection is maintained
+5. API Bridge receives HTTP requests from clients on port 8080
+6. These requests are forwarded through the secure tunnel to the API Offramp
+7. API Offramp forwards the requests to the configured target endpoint
+8. API Offramp receives responses from the target endpoint
+9. These responses are sent back through the tunnel to the API Bridge
+10. API Bridge returns the responses to the original clients
+11. If the connection is lost, the offramp automatically attempts to reconnect
+12. All communication is encrypted using TLS 1.2+
 
 ## Security Considerations
 
@@ -123,6 +138,8 @@ Build artifacts will be placed in the `build/<arch>/` directory.
 - Ensure the PSK is kept secure and not shared
 - Use proper firewall rules to restrict access
 - Consider implementing IP allowlisting
+- Validate and sanitize all HTTP requests and responses
+- Consider using different ports for HTTP and tunnel traffic
 
 ## License
 
