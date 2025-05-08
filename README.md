@@ -1,138 +1,129 @@
-# Apiduct
+# API Duct
 
-A secure API tunneling system that enables secure communication between services through persistent TLS connections with PSK authentication.
+A secure API tunneling system that enables secure communication through persistent TLS connections with PSK authentication.
 
 ## Components
 
-### API Bridge (Client)
-- HTTP/HTTPS request receiver
-- TLS connection initiator with PSK authentication
-- Request forwarder through secure tunnel
-- Response receiver from secure tunnel
+### API Bridge (Server)
+The API Bridge acts as a server that:
+- Listens for incoming TLS connections from API Offramp
+- Authenticates connections using PSK
+- Forwards HTTP requests to the target service
+- Returns responses back through the secure tunnel
 
-### API Offramp (Server)
-- TLS connection listener with PSK authentication
-- HTTP/HTTPS request processor
-- Target endpoint forwarder
-- Response sender through secure tunnel
+### API Offramp (Client)
+The API Offramp acts as a client that:
+- Initiates TLS connections to the API Bridge
+- Authenticates using PSK
+- Forwards HTTP requests from the target service
+- Returns responses back through the secure tunnel
+- Automatically reconnects if the connection is lost
+- Maintains a persistent connection to the bridge
 
 ## Features
 
 - Persistent TLS connections with PSK authentication
-- HTTP/HTTPS support
-- Configurable ports and endpoints
-- Graceful shutdown handling
-- Secure connection with TLS 1.2+
-- Connection keep-alive
-- Automatic reconnection
+- Automatic reconnection handling
+- Support for HTTP/HTTPS traffic
+- Cross-platform compatibility
+- Multi-architecture support (amd64, arm64)
+- Secure communication with TLS 1.2+
+- Automatic connection recovery
 
 ## Prerequisites
 
 - Go 1.21 or later
-- SSL certificate and key files (for HTTPS support)
+- Valid TLS certificates (if using HTTPS)
+- Network access to the API Bridge server
 
 ## Building
 
+The project includes a Makefile for building both components for different architectures:
+
 ```bash
-# Build both components
-go build ./api-bridge
-go build ./api-offramp
+# Build all components for all architectures
+make
+
+# Build only the bridge component
+make build-bridge
+
+# Build only the offramp component
+make build-offramp
+
+# Clean build artifacts
+make clean
 ```
+
+Build artifacts will be placed in the `build/<arch>/` directory.
 
 ## Usage
 
-### API Bridge (Client)
+### API Bridge (Server)
 
 ```bash
-# Basic HTTP Mode
-./api-bridge -listen-ip <ip> -remote-ip <ip> -remote-port <port> -psk <key> [-http-port <port>] [-target-port <port>] [-target-host <host>]
-
-# HTTPS Mode
-./api-bridge -listen-ip <ip> -remote-ip <ip> -remote-port <port> -psk <key> [-http-port <port>] [-target-port <port>] [-target-host <host>] -enable-https -cert-file <cert.pem> -key-file <key.pem>
+./api-bridge \
+  -listen-ip 10.0.0.1 \
+  -listen-port 8081 \
+  -psk your-secret-key \
+  -target-port 8080 \
+  -target-host localhost \
+  -enable-https \
+  -cert-file /path/to/cert.pem \
+  -key-file /path/to/key.pem
 ```
 
-### API Offramp (Server)
+### API Offramp (Client)
 
 ```bash
-# Basic HTTP Mode
-./api-offramp -listen-ip <ip> -listen-port <port> -psk <key> [-target-port <port>] [-target-host <host>]
-
-# HTTPS Mode
-./api-offramp -listen-ip <ip> -listen-port <port> -psk <key> [-target-port <port>] [-target-host <host>] -enable-https -cert-file <cert.pem> -key-file <key.pem>
+./api-offramp \
+  -remote-ip 10.0.0.1 \    # IP address of the API Bridge
+  -remote-port 8081 \      # Port of the API Bridge
+  -psk your-secret-key \   # Must match the bridge's PSK
+  -target-port 8080 \      # Port of the target service
+  -target-host localhost \ # Host of the target service
+  -enable-https \          # Enable HTTPS support
+  -cert-file /path/to/cert.pem \ # TLS certificate
+  -key-file /path/to/key.pem     # TLS private key
 ```
 
-### Parameters
+## Example Setup
 
-#### API Bridge
-- `-listen-ip`: IP address to listen for HTTP requests (required)
-- `-remote-ip`: Remote IP address for tunnel connection (required)
-- `-remote-port`: Remote port for tunnel connection (default: 8081)
-- `-psk`: Pre-shared key for tunnel authentication (required)
-- `-http-port`: Port to listen for HTTP requests (default: 8080)
-- `-target-port`: Port to forward requests to (default: 8080)
-- `-target-host`: Host to forward requests to (default: localhost)
-- `-enable-https`: Enable HTTPS support
-- `-cert-file`: Path to SSL certificate file (required for HTTPS)
-- `-key-file`: Path to SSL key file (required for HTTPS)
+1. Start the API Bridge (server):
+   ```bash
+   ./api-bridge -listen-ip 10.0.0.1 -listen-port 8081 -psk your-secret-key -target-port 8080 -target-host localhost
+   ```
 
-#### API Offramp
-- `-listen-ip`: IP address to listen for tunnel connections (required)
-- `-listen-port`: Port to listen for tunnel connections (default: 8081)
-- `-psk`: Pre-shared key for tunnel authentication (required)
-- `-target-port`: Port to forward requests to (default: 8080)
-- `-target-host`: Host to forward requests to (default: localhost)
-- `-enable-https`: Enable HTTPS support
-- `-cert-file`: Path to SSL certificate file (required for HTTPS)
-- `-key-file`: Path to SSL key file (required for HTTPS)
+2. Start the API Offramp (client):
+   ```bash
+   ./api-offramp -remote-ip 10.0.0.1 -remote-port 8081 -psk your-secret-key -target-port 8080 -target-host localhost
+   ```
 
-### Example Setup
+3. The API Offramp will:
+   - Connect to the API Bridge using TLS
+   - Authenticate using the PSK
+   - Forward HTTP requests to the target service
+   - Return responses through the secure tunnel
+   - Automatically reconnect if the connection is lost
 
-1. Start the API Offramp (server):
-```bash
-./api-offramp -listen-ip 10.0.0.2 -listen-port 8081 -psk "my-secret-key" -target-host api.example.com -target-port 443
-```
+## Connection Flow
 
-2. Start the API Bridge (client):
-```bash
-./api-bridge -listen-ip 10.0.0.1 -remote-ip 10.0.0.2 -remote-port 8081 -psk "my-secret-key" -http-port 80 -target-host api.example.com -target-port 443
-```
-
-This setup will:
-1. Create a secure TLS connection between 10.0.0.1 and 10.0.0.2:8081
-2. Use PSK authentication for the tunnel
-3. Listen for HTTP requests on port 80
-4. Forward all traffic to api.example.com:443
-5. Encapsulate all traffic in TLS with PSK authentication
-
-## How it Works
-
-1. The API Bridge:
-   - Listens for HTTP/HTTPS requests on the specified port
-   - Establishes a persistent TLS connection to the API Offramp
-   - Authenticates using PSK
-   - Forwards the request through the secure tunnel
-   - Receives the response through the same tunnel
-
-2. The API Offramp:
-   - Listens for TLS connections
-   - Verifies the PSK authentication
-   - Forwards the request to the target endpoint
-   - Sends the response back through the same tunnel
-
-3. The API Bridge:
-   - Receives the response through the tunnel
-   - Sends the response back to the original requestor
+1. API Offramp initiates a TLS connection to the API Bridge
+2. PSK authentication is performed
+3. Once authenticated, the connection is maintained
+4. HTTP requests are forwarded through the secure tunnel
+5. If the connection is lost, the offramp automatically attempts to reconnect
+6. All communication is encrypted using TLS 1.2+
 
 ## Security Considerations
 
-- TLS 1.2+ is used for all tunnel connections
-- PSK authentication is required for all connections
-- Ensure proper firewall rules are in place
-- Use strong PSK for authentication
-- Use strong SSL certificates for HTTPS
-- Consider implementing additional security measures like authentication
-- The tunnel port can be restricted to specific ports for additional security
+- Always use strong PSK values
+- In production, use proper TLS certificate verification
+- Consider implementing rate limiting
+- Monitor connection logs for suspicious activity
+- Ensure the PSK is kept secure and not shared
+- Use proper firewall rules to restrict access
+- Consider implementing IP allowlisting
 
 ## License
 
-MIT 
+MIT License 

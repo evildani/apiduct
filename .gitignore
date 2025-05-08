@@ -4,8 +4,6 @@
 *.dll
 *.so
 *.dylib
-api-bridge
-api-offramp
 
 # Test binary, built with `go test -c`
 *.test
