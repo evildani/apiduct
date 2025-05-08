@@ -1,34 +1,34 @@
 # Apiduct
 
-A secure GRE-based API tunneling system that enables secure communication between services through GRE tunnels with PSK authentication.
+A secure API tunneling system that enables secure communication between services through persistent TLS connections with PSK authentication.
 
 ## Components
 
-### API Bridge (Receiver)
-- GRE packet listener with PSK authentication
-- HTTP/HTTPS request processor
-- Configurable endpoint forwarding
-- Port-based GRE packet filtering
+### API Bridge (Client)
+- HTTP/HTTPS request receiver
+- TLS connection initiator with PSK authentication
+- Request forwarder through secure tunnel
+- Response receiver from secure tunnel
 
-### API Offramp (Sender)
-- GRE tunnel creator with PSK authentication
-- HTTP/HTTPS traffic forwarder
-- Configurable target endpoints
-- Secure GRE packet encapsulation
+### API Offramp (Server)
+- TLS connection listener with PSK authentication
+- HTTP/HTTPS request processor
+- Target endpoint forwarder
+- Response sender through secure tunnel
 
 ## Features
 
-- GRE tunnel with PSK authentication
+- Persistent TLS connections with PSK authentication
 - HTTP/HTTPS support
 - Configurable ports and endpoints
 - Graceful shutdown handling
-- Secure packet encapsulation
-- Port-based GRE packet filtering
+- Secure connection with TLS 1.2+
+- Connection keep-alive
+- Automatic reconnection
 
 ## Prerequisites
 
 - Go 1.21 or later
-- Linux system with root privileges
 - SSL certificate and key files (for HTTPS support)
 
 ## Building
@@ -41,32 +41,34 @@ go build ./api-offramp
 
 ## Usage
 
-### API Bridge (Receiver)
+### API Bridge (Client)
 
 ```bash
 # Basic HTTP Mode
-sudo ./api-bridge -listen-ip <ip> -psk <key> [-gre-port <port>] [-target-port <port>] [-target-host <host>]
+./api-bridge -listen-ip <ip> -remote-ip <ip> -remote-port <port> -psk <key> [-http-port <port>] [-target-port <port>] [-target-host <host>]
 
 # HTTPS Mode
-sudo ./api-bridge -listen-ip <ip> -psk <key> [-gre-port <port>] [-target-port <port>] [-target-host <host>] -enable-https -cert-file <cert.pem> -key-file <key.pem>
+./api-bridge -listen-ip <ip> -remote-ip <ip> -remote-port <port> -psk <key> [-http-port <port>] [-target-port <port>] [-target-host <host>] -enable-https -cert-file <cert.pem> -key-file <key.pem>
 ```
 
-### API Offramp (Sender)
+### API Offramp (Server)
 
 ```bash
 # Basic HTTP Mode
-sudo ./api-offramp -local-ip <ip> -remote-ip <ip> -psk <key> [-target-port <port>] [-target-host <host>]
+./api-offramp -listen-ip <ip> -listen-port <port> -psk <key> [-target-port <port>] [-target-host <host>]
 
 # HTTPS Mode
-sudo ./api-offramp -local-ip <ip> -remote-ip <ip> -psk <key> [-target-port <port>] [-target-host <host>] -enable-https -cert-file <cert.pem> -key-file <key.pem>
+./api-offramp -listen-ip <ip> -listen-port <port> -psk <key> [-target-port <port>] [-target-host <host>] -enable-https -cert-file <cert.pem> -key-file <key.pem>
 ```
 
 ### Parameters
 
 #### API Bridge
-- `-listen-ip`: IP address to listen for GRE packets (required)
-- `-psk`: Pre-shared key for GRE authentication (required)
-- `-gre-port`: Port to listen for GRE packets (default: 0, any port)
+- `-listen-ip`: IP address to listen for HTTP requests (required)
+- `-remote-ip`: Remote IP address for tunnel connection (required)
+- `-remote-port`: Remote port for tunnel connection (default: 8081)
+- `-psk`: Pre-shared key for tunnel authentication (required)
+- `-http-port`: Port to listen for HTTP requests (default: 8080)
 - `-target-port`: Port to forward requests to (default: 8080)
 - `-target-host`: Host to forward requests to (default: localhost)
 - `-enable-https`: Enable HTTPS support
@@ -74,9 +76,9 @@ sudo ./api-offramp -local-ip <ip> -remote-ip <ip> -psk <key> [-target-port <port
 - `-key-file`: Path to SSL key file (required for HTTPS)
 
 #### API Offramp
-- `-local-ip`: Local IP address for GRE tunnel (required)
-- `-remote-ip`: Remote IP address for GRE tunnel (required)
-- `-psk`: Pre-shared key for GRE authentication (required)
+- `-listen-ip`: IP address to listen for tunnel connections (required)
+- `-listen-port`: Port to listen for tunnel connections (default: 8081)
+- `-psk`: Pre-shared key for tunnel authentication (required)
 - `-target-port`: Port to forward requests to (default: 8080)
 - `-target-host`: Host to forward requests to (default: localhost)
 - `-enable-https`: Enable HTTPS support
@@ -85,46 +87,51 @@ sudo ./api-offramp -local-ip <ip> -remote-ip <ip> -psk <key> [-target-port <port
 
 ### Example Setup
 
-1. Start the API Bridge (receiver):
+1. Start the API Offramp (server):
 ```bash
-sudo ./api-bridge -listen-ip 10.0.0.2 -psk "my-secret-key" -gre-port 1234 -target-host api.example.com -target-port 443
+./api-offramp -listen-ip 10.0.0.2 -listen-port 8081 -psk "my-secret-key" -target-host api.example.com -target-port 443
 ```
 
-2. Start the API Offramp (sender):
+2. Start the API Bridge (client):
 ```bash
-sudo ./api-offramp -local-ip 10.0.0.1 -remote-ip 10.0.0.2 -psk "my-secret-key" -target-host api.example.com -target-port 443
+./api-bridge -listen-ip 10.0.0.1 -remote-ip 10.0.0.2 -remote-port 8081 -psk "my-secret-key" -http-port 80 -target-host api.example.com -target-port 443
 ```
 
 This setup will:
-1. Create a GRE tunnel between 10.0.0.1 and 10.0.0.2
-2. Use PSK authentication for the GRE tunnel
-3. Listen for GRE packets on port 1234
+1. Create a secure TLS connection between 10.0.0.1 and 10.0.0.2:8081
+2. Use PSK authentication for the tunnel
+3. Listen for HTTP requests on port 80
 4. Forward all traffic to api.example.com:443
-5. Encapsulate all traffic in GRE packets with PSK authentication
+5. Encapsulate all traffic in TLS with PSK authentication
 
 ## How it Works
 
-1. The API Offramp creates a TUN interface and establishes a GRE tunnel to the API Bridge
-2. When a connection is received by the API Offramp:
-   - Reads the incoming data
-   - Wraps it in a GRE packet with PSK authentication
-   - Forwards it through the tunnel
-3. The API Bridge:
-   - Listens for GRE packets on the specified port
+1. The API Bridge:
+   - Listens for HTTP/HTTPS requests on the specified port
+   - Establishes a persistent TLS connection to the API Offramp
+   - Authenticates using PSK
+   - Forwards the request through the secure tunnel
+   - Receives the response through the same tunnel
+
+2. The API Offramp:
+   - Listens for TLS connections
    - Verifies the PSK authentication
-   - Processes the encapsulated HTTP/HTTPS request
    - Forwards the request to the target endpoint
-4. The response follows the reverse path through the tunnel
+   - Sends the response back through the same tunnel
+
+3. The API Bridge:
+   - Receives the response through the tunnel
+   - Sends the response back to the original requestor
 
 ## Security Considerations
 
-- Both components require root privileges to create network interfaces
-- PSK authentication is required for all GRE packets
+- TLS 1.2+ is used for all tunnel connections
+- PSK authentication is required for all connections
 - Ensure proper firewall rules are in place
-- Use strong PSK for GRE authentication
+- Use strong PSK for authentication
 - Use strong SSL certificates for HTTPS
 - Consider implementing additional security measures like authentication
-- The GRE port can be restricted to specific ports for additional security
+- The tunnel port can be restricted to specific ports for additional security
 
 ## License
 
