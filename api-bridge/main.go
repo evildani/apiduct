@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"bytes"
 	"crypto/sha256"
 	"flag"
 	"fmt"
@@ -9,11 +10,7 @@ import (
 	"log"
 	"net"
 	"net/http"
-	"os"
-	"os/signal"
 	"sync"
-	"syscall"
-	"time"
 )
 
 var (
@@ -61,64 +58,35 @@ func (t *TunnelConnection) IsConnected() bool {
 	return t.conn != nil
 }
 
-func main() {
-	config := &Config{}
-
-	// Command line flags
-	flag.StringVar(&config.ListenIP, "listen-ip", "0.0.0.0", "IP address to listen on for HTTP/HTTPS requests")
-	flag.IntVar(&config.ListenPort, "listen-port", 8080, "Port to listen on for HTTP/HTTPS requests")
-	flag.IntVar(&config.TunnelPort, "tunnel-port", 8000, "Port to listen on for tunnel connections")
-	flag.StringVar(&config.PSK, "psk", "", "Pre-shared key for tunnel authentication")
-	flag.BoolVar(&config.EnableHTTP, "enable-http", false, "Enable HTTP for direct access")
-	flag.BoolVar(&config.EnableHTTPS, "enable-https", false, "Enable HTTPS for direct access")
-	flag.StringVar(&config.CertFile, "cert-file", "server.crt", "Path to TLS certificate file")
-	flag.StringVar(&config.KeyFile, "key-file", "server.key", "Path to TLS key file")
-	flag.Parse()
-
-	// Validate PSK
-	if config.PSK == "" {
-		log.Fatal("PSK is required")
-	}
-
-	// Validate HTTP/HTTPS configuration
-	if !config.EnableHTTP && !config.EnableHTTPS {
-		log.Fatal("At least one of HTTP or HTTPS must be enabled")
-	}
-
-	// Validate HTTPS configuration if enabled
-	if config.EnableHTTPS {
-		if config.CertFile == "" || config.KeyFile == "" {
-			log.Fatal("Certificate and key files are required for HTTPS")
-		}
-	}
-
-	// Create tunnel connection manager
-	tunnelConn := &TunnelConnection{}
-
-	// Create HTTP/HTTPS server
-	httpMux := http.NewServeMux()
-	httpMux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+func createProxyHandler(tunnelConn *TunnelConnection) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// Check if tunnel connection is available
 		if !tunnelConn.IsConnected() {
-			http.Error(w, "Tunnel connection not available", http.StatusVariantAlsoNegotiates)
+			log.Printf("[BRIDGE] Tunnel connection not available")
+			http.Error(w, "Tunnel connection not available", http.StatusServiceUnavailable)
 			return
 		}
 
-		// Forward request through tunnel
+		// Forward the request through the tunnel
+		log.Printf("[BRIDGE] Forwarding request to tunnel: %s %s", r.Method, r.URL.Path)
 		if err := r.Write(tunnelConn); err != nil {
+			log.Printf("[BRIDGE] Failed to forward request through tunnel: %v", err)
 			http.Error(w, "Failed to forward request", http.StatusBadGateway)
 			return
 		}
 
-		// Read the response
+		// Read response from tunnel
+		log.Printf("[BRIDGE] Reading response from tunnel")
 		resp, err := http.ReadResponse(bufio.NewReader(tunnelConn), r)
 		if err != nil {
+			log.Printf("[BRIDGE] Failed to read response from tunnel: %v", err)
 			http.Error(w, "Failed to read response", http.StatusBadGateway)
 			return
 		}
 		defer resp.Body.Close()
 
 		// Copy response headers
+		log.Printf("[BRIDGE] Forwarding response to client: %d %s", resp.StatusCode, resp.Status)
 		for key, values := range resp.Header {
 			for _, value := range values {
 				w.Header().Add(key, value)
@@ -128,104 +96,112 @@ func main() {
 
 		// Copy response body
 		if _, err := io.Copy(w, resp.Body); err != nil {
-			log.Printf("Error copying response body: %v", err)
+			log.Printf("[BRIDGE] Failed to copy response body: %v", err)
+			return
 		}
 	})
+}
 
-	// Start HTTP/HTTPS server
+func main() {
+	config := &Config{}
+
+	// Command line flags
+	flag.StringVar(&config.ListenIP, "listen-ip", "0.0.0.0", "IP address to listen on")
+	flag.IntVar(&config.ListenPort, "listen-port", 8000, "Port to listen on")
+	flag.IntVar(&config.TunnelPort, "tunnel-port", 8001, "Port to listen for tunnel connections")
+	flag.StringVar(&config.PSK, "psk", "", "Pre-shared key for tunnel authentication")
+	flag.BoolVar(&config.EnableHTTPS, "enable-https", false, "Enable HTTPS for HTTP listener")
+	flag.StringVar(&config.CertFile, "cert-file", "", "Path to TLS certificate file")
+	flag.StringVar(&config.KeyFile, "key-file", "", "Path to TLS key file")
+	flag.Parse()
+
+	// Validate required parameters
+	if config.PSK == "" {
+		log.Fatal("PSK is required")
+	}
+
+	// Create tunnel connection manager
+	tunnelConn := &TunnelConnection{}
+
+	// Start tunnel listener
 	go func() {
-		httpAddr := fmt.Sprintf("%s:%d", config.ListenIP, config.ListenPort)
-		var err error
-
-		if config.EnableHTTPS {
-			log.Printf("Starting HTTPS server on %s", httpAddr)
-			err = http.ListenAndServeTLS(httpAddr, config.CertFile, config.KeyFile, httpMux)
-		} else if config.EnableHTTP {
-			log.Printf("Starting HTTP server on %s", httpAddr)
-			err = http.ListenAndServe(httpAddr, httpMux)
-		}
-
+		log.Printf("[BRIDGE] Starting tunnel listener on %s:%d", config.ListenIP, config.TunnelPort)
+		listener, err := net.Listen("tcp", fmt.Sprintf("%s:%d", config.ListenIP, config.TunnelPort))
 		if err != nil {
-			log.Fatalf("HTTP/HTTPS server error: %v", err)
+			log.Fatalf("Failed to start tunnel listener: %v", err)
+		}
+		defer listener.Close()
+
+		for {
+			conn, err := listener.Accept()
+			if err != nil {
+				log.Printf("[BRIDGE] Failed to accept tunnel connection: %v", err)
+				continue
+			}
+
+			// Handle tunnel connection
+			go handleTunnelConnection(conn, tunnelConn, config)
 		}
 	}()
 
-	// Create tunnel listener
-	tunnelListener, err := net.Listen("tcp", fmt.Sprintf("%s:%d", config.ListenIP, config.TunnelPort))
-	if err != nil {
-		log.Fatalf("Error creating tunnel listener: %v", err)
+	// Create HTTP server
+	server := &http.Server{
+		Addr:    fmt.Sprintf("%s:%d", config.ListenIP, config.ListenPort),
+		Handler: createProxyHandler(tunnelConn),
 	}
-	defer tunnelListener.Close()
 
-	log.Printf("Starting tunnel server on %s:%d", config.ListenIP, config.TunnelPort)
-
-	// Accept tunnel connections
-	go acceptTunnelConnections(tunnelListener, tunnelConn, *config)
-
-	// Wait for signals
-	sigChan := make(chan os.Signal, 1)
-	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
-	<-sigChan
-	log.Println("Shutting down...")
-}
-
-func acceptTunnelConnections(listener net.Listener, tunnelConn *TunnelConnection, config Config) {
-	for {
-		conn, err := listener.Accept()
-		if err != nil {
-			log.Printf("Failed to accept tunnel connection: %v", err)
-			continue
+	// Start HTTP server
+	log.Printf("[BRIDGE] Starting HTTP server on %s:%d", config.ListenIP, config.ListenPort)
+	if config.EnableHTTPS {
+		if config.CertFile == "" || config.KeyFile == "" {
+			log.Fatal("Certificate and key files are required for HTTPS")
 		}
-
-		// Set keep-alive
-		if tcpConn, ok := conn.(*net.TCPConn); ok {
-			tcpConn.SetKeepAlive(true)
-			tcpConn.SetKeepAlivePeriod(30 * time.Second)
+		if err := server.ListenAndServeTLS(config.CertFile, config.KeyFile); err != nil {
+			log.Fatalf("Failed to start HTTPS server: %v", err)
 		}
-
-		// Read PSK for authentication
-		pskHash := make([]byte, 32)
-		if _, err := io.ReadFull(conn, pskHash); err != nil {
-			log.Printf("Failed to read PSK: %v", err)
-			conn.Close()
-			continue
+	} else {
+		if err := server.ListenAndServe(); err != nil {
+			log.Fatalf("Failed to start HTTP server: %v", err)
 		}
-
-		// Verify PSK
-		expectedHash := sha256.Sum256([]byte(config.PSK))
-		if !compareHashes(pskHash, expectedHash[:]) {
-			log.Printf("Authentication failed")
-			conn.Close()
-			continue
-		}
-
-		// Send authentication success
-		if _, err := conn.Write([]byte{0}); err != nil {
-			log.Printf("Failed to send authentication response: %v", err)
-			conn.Close()
-			continue
-		}
-
-		// Store the new connection
-		tunnelConn.mu.Lock()
-		if tunnelConn.conn != nil {
-			tunnelConn.conn.Close()
-		}
-		tunnelConn.conn = conn
-		tunnelConn.mu.Unlock()
-
-		log.Printf("New tunnel connection established")
 	}
 }
 
-func compareHashes(a, b []byte) bool {
-	if len(a) != len(b) {
-		return false
+func handleTunnelConnection(conn net.Conn, tunnelConn *TunnelConnection, config *Config) {
+	defer conn.Close()
+
+	// Read PSK
+	log.Printf("[BRIDGE] Reading PSK from tunnel connection")
+	pskHash := make([]byte, 32)
+	if _, err := io.ReadFull(conn, pskHash); err != nil {
+		log.Printf("[BRIDGE] Failed to read PSK: %v", err)
+		return
 	}
-	for i := range a {
-		if a[i] != b[i] {
-			return false
-		}
+
+	// Verify PSK
+	expectedHash := sha256.Sum256([]byte(config.PSK))
+	if !bytes.Equal(pskHash, expectedHash[:]) {
+		log.Printf("[BRIDGE] PSK verification failed")
+		conn.Write([]byte{1}) // Authentication failed
+		return
 	}
-	return true
+
+	// Send authentication success
+	log.Printf("[BRIDGE] PSK verification successful")
+	if _, err := conn.Write([]byte{0}); err != nil {
+		log.Printf("[BRIDGE] Failed to send authentication success: %v", err)
+		return
+	}
+
+	// Store the tunnel connection
+	tunnelConn.mu.Lock()
+	if tunnelConn.conn != nil {
+		tunnelConn.conn.Close()
+	}
+	tunnelConn.conn = conn
+	tunnelConn.mu.Unlock()
+
+	log.Printf("[BRIDGE] Tunnel connection established")
+
+	// Keep the connection alive
+	<-make(chan struct{})
 }

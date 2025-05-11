@@ -142,7 +142,7 @@ func manageTunnelConnection(tunnelConn *TunnelConnection, targetConn *TargetConn
 		log.Printf("Tunnel connection established")
 
 		// Handle tunnel traffic
-		handleTunnelTraffic(conn, targetConn, config)
+		handleTunnelTraffic(tunnelConn.conn, targetConn, config)
 
 		// If we get here, the connection was closed
 		log.Printf("Tunnel connection closed, attempting to reconnect...")
@@ -155,7 +155,7 @@ func manageTargetConnection(targetConn *TargetConnection, config *Config) {
 		// Create target connection
 		conn, err := createTargetConnection(config)
 		if err != nil {
-			log.Printf("Failed to establish target connection: %v", err)
+			log.Printf("[OFFRAMP] Failed to establish target connection: %v", err)
 			time.Sleep(5 * time.Second) // Wait before retrying
 			continue
 		}
@@ -168,40 +168,51 @@ func manageTargetConnection(targetConn *TargetConnection, config *Config) {
 		targetConn.conn = conn
 		targetConn.mu.Unlock()
 
-		log.Printf("Target connection established")
+		log.Printf("[OFFRAMP] Target connection established")
 
 		// Monitor connection health
-
 		go func() {
-			log.Printf("Health check request sent\n")
+			log.Printf("[OFFRAMP] Starting health check loop")
 			ticker := time.NewTicker(1 * time.Second)
 			defer ticker.Stop()
 
 			for range ticker.C {
-				// Create HEAD request
-				req, err := http.NewRequest("GET", fmt.Sprintf("http://%s:%d/", config.TargetHost, config.TargetPort), nil)
+				// Create a new connection for health check
+				healthConn, err := net.Dial("tcp", fmt.Sprintf("%s:%d", config.TargetHost, config.TargetPort))
 				if err != nil {
-					log.Printf("Failed to create health check request: %v", err)
+					log.Printf("[OFFRAMP] Failed to create health check connection: %v", err)
+					targetConn.Close()
+					return
+				}
+
+				// Create HEAD request
+				//log.Printf("[OFFRAMP] Creating health check request")
+				req, err := http.NewRequest("HEAD", fmt.Sprintf("http://%s:%d/", config.TargetHost, config.TargetPort), nil)
+				if err != nil {
+					log.Printf("[OFFRAMP] Failed to create health check request: %v", err)
+					healthConn.Close()
 					targetConn.Close()
 					return
 				}
 
 				// Send request
-				if err := req.Write(targetConn); err != nil {
-					log.Printf("Health check request failed: %v", err)
+				//log.Printf("[OFFRAMP] Sending health check request")
+				if err := req.Write(healthConn); err != nil {
+					log.Printf("[OFFRAMP] Health check request failed: %v", err)
+					healthConn.Close()
 					targetConn.Close()
 					return
 				}
 
 				// Read response with timeout
-				targetConn.mu.Lock()
-				targetConn.conn.SetReadDeadline(time.Now().Add(5 * time.Second))
-				resp, err := http.ReadResponse(bufio.NewReader(targetConn), req)
-				targetConn.conn.SetReadDeadline(time.Time{}) // Clear deadline
-				targetConn.mu.Unlock()
+				//log.Printf("[OFFRAMP] Reading health check response")
+				healthConn.SetReadDeadline(time.Now().Add(5 * time.Second))
+				resp, err := http.ReadResponse(bufio.NewReader(healthConn), req)
+				healthConn.SetReadDeadline(time.Time{}) // Clear deadline
 
 				if err != nil {
-					log.Printf("Health check response failed: %v", err)
+					log.Printf("[OFFRAMP] Health check response failed: %v", err)
+					healthConn.Close()
 					targetConn.Close()
 					return
 				}
@@ -209,14 +220,16 @@ func manageTargetConnection(targetConn *TargetConnection, config *Config) {
 				// Check response status
 				if resp.StatusCode >= 200 && resp.StatusCode < 300 {
 					// Connection is healthy
-					log.Printf("Health check OK with status: %d", resp.StatusCode)
+					//log.Printf("[OFFRAMP] Health check OK with status: %d", resp.StatusCode)
 					resp.Body.Close()
+					healthConn.Close()
 					continue
 				}
 
 				// Unexpected status code
-				log.Printf("Health check failed with status: %d", resp.StatusCode)
+				//log.Printf("[OFFRAMP] Health check failed with status: %d", resp.StatusCode)
 				resp.Body.Close()
+				healthConn.Close()
 				targetConn.Close()
 				return
 			}
@@ -224,7 +237,7 @@ func manageTargetConnection(targetConn *TargetConnection, config *Config) {
 
 		// Wait for connection to close
 		<-make(chan struct{}) // Block until connection is closed
-		log.Printf("Target connection closed, attempting to reconnect...")
+		log.Printf("[OFFRAMP] Target connection closed, attempting to reconnect...")
 		time.Sleep(5 * time.Second) // Wait before retrying
 	}
 }
@@ -234,47 +247,50 @@ func handleTunnelTraffic(conn net.Conn, targetConn *TargetConnection, config *Co
 
 	// Process requests from the tunnel
 	for {
-		// Check if target connection is still valid
-		if !targetConn.IsConnected() {
-			log.Printf("Target connection lost, waiting for reconnection...")
-			time.Sleep(1 * time.Second)
-			continue
-		}
-
 		// Read HTTP request from tunnel
 		req, err := http.ReadRequest(bufio.NewReader(conn))
 		if err != nil {
 			if err != io.EOF {
-				log.Printf("Failed to read request from tunnel: %v", err)
+				log.Printf("[OFFRAMP] Failed to read request from tunnel: %v", err)
 			}
 			return
 		}
+		log.Printf("[OFFRAMP] Received request from tunnel: %s %s", req.Method, req.URL.Path)
+
+		// Create a new request for the target
+		targetURL := fmt.Sprintf("http://%s:%d%s", config.TargetHost, config.TargetPort, req.URL.Path)
+		targetReq, err := http.NewRequest(req.Method, targetURL, req.Body)
+		if err != nil {
+			log.Printf("[OFFRAMP] Failed to create target request: %v", err)
+			continue
+		}
+
+		// Copy headers from original request
+		for key, values := range req.Header {
+			for _, value := range values {
+				targetReq.Header.Add(key, value)
+			}
+		}
+
+		// Create a new HTTP client for this request
+		client := &http.Client{
+			Timeout: 30 * time.Second,
+		}
 
 		// Forward the request to target
-		if err := req.Write(targetConn); err != nil {
-			log.Printf("Failed to forward request to target: %v", err)
-			// If write fails, the connection might be dead
-			targetConn.Close()
-			continue
-		}
-
-		// Read response from target with timeout
-		targetConn.mu.Lock()
-		targetConn.conn.SetReadDeadline(time.Now().Add(30 * time.Second))
-		resp, err := http.ReadResponse(bufio.NewReader(targetConn), req)
-		targetConn.conn.SetReadDeadline(time.Time{}) // Clear deadline
-		targetConn.mu.Unlock()
-
+		log.Printf("[OFFRAMP] Forwarding request to target: %s %s", req.Method, req.URL.Path)
+		resp, err := client.Do(targetReq)
 		if err != nil {
-			log.Printf("Failed to read response from target: %v", err)
-			// If read fails, the connection might be dead
-			targetConn.Close()
+			log.Printf("[OFFRAMP] Failed to forward request to target: %v", err)
 			continue
 		}
+
+		log.Printf("[OFFRAMP] Received response from target: %d %s", resp.StatusCode, resp.Status)
 
 		// Forward response back through tunnel
+		log.Printf("[OFFRAMP] Forwarding response through tunnel: %d %s", resp.StatusCode, resp.Status)
 		if err := resp.Write(conn); err != nil {
-			log.Printf("Failed to forward response through tunnel: %v", err)
+			log.Printf("[OFFRAMP] Failed to forward response through tunnel: %v", err)
 			resp.Body.Close()
 			continue
 		}
@@ -284,6 +300,7 @@ func handleTunnelTraffic(conn net.Conn, targetConn *TargetConnection, config *Co
 
 func createTunnelConnection(config *Config) (net.Conn, error) {
 	// Connect to bridge
+	log.Printf("[OFFRAMP] Connecting to bridge at %s:%d", config.BridgeIP, config.BridgePort)
 	conn, err := net.Dial("tcp", fmt.Sprintf("%s:%d", config.BridgeIP, config.BridgePort))
 	if err != nil {
 		return nil, fmt.Errorf("failed to connect to bridge: %v", err)
@@ -296,6 +313,7 @@ func createTunnelConnection(config *Config) (net.Conn, error) {
 	}
 
 	// Send PSK for authentication
+	log.Printf("[OFFRAMP] Sending PSK authentication")
 	pskHash := sha256.Sum256([]byte(config.PSK))
 	if _, err := conn.Write(pskHash[:]); err != nil {
 		conn.Close()
@@ -313,12 +331,14 @@ func createTunnelConnection(config *Config) (net.Conn, error) {
 		conn.Close()
 		return nil, fmt.Errorf("authentication failed")
 	}
+	log.Printf("[OFFRAMP] PSK authentication successful")
 
 	return conn, nil
 }
 
 func createTargetConnection(config *Config) (net.Conn, error) {
 	// Connect to target
+	log.Printf("[OFFRAMP] Connecting to target at %s:%d", config.TargetHost, config.TargetPort)
 	conn, err := net.Dial("tcp", fmt.Sprintf("%s:%d", config.TargetHost, config.TargetPort))
 	if err != nil {
 		return nil, fmt.Errorf("failed to connect to target: %v", err)
@@ -329,6 +349,7 @@ func createTargetConnection(config *Config) (net.Conn, error) {
 		tcpConn.SetKeepAlive(true)
 		tcpConn.SetKeepAlivePeriod(30 * time.Second)
 	}
+	log.Printf("[OFFRAMP] Target connection established")
 
 	return conn, nil
 }
